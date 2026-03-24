@@ -34,6 +34,7 @@ DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
+DEFAULT_CORS_ORIGIN_REGEX = r"^https://unified-portal-.*\.vercel\.app$"
 
 from contextlib import asynccontextmanager
 
@@ -79,9 +80,13 @@ async def lifespan(app_: FastAPI):
 app = FastAPI(title="Rajasthan Dashboard API v3", lifespan=lifespan)
 
 
+def _clean_origin(value: str) -> str:
+    return value.strip().strip("\"'").rstrip("/")
+
+
 def _cors_origins():
     raw = os.getenv("CORS_ORIGINS", "").strip()
-    env_origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+    env_origins = [_clean_origin(origin) for origin in raw.split(",") if _clean_origin(origin)]
     origins = []
     for origin in DEFAULT_CORS_ORIGINS + env_origins:
         if origin and origin not in origins:
@@ -89,12 +94,25 @@ def _cors_origins():
     return origins
 
 
+def _cors_origin_regex():
+    raw = os.getenv("CORS_ORIGIN_REGEX", "").strip()
+    regex = _clean_origin(raw)
+    return regex or DEFAULT_CORS_ORIGIN_REGEX
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
+    allow_origin_regex=_cors_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+log.info(
+    "CORS configured for origins=%s regex=%s",
+    _cors_origins(),
+    _cors_origin_regex(),
 )
 
 _cache: dict = {}
