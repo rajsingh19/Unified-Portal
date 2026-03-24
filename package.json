@@ -1,0 +1,11 @@
+{
+  "name": "rj-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rajasthan Unified Government Portal — full-stack dashboard",
+  "scripts": {
+    "start": "bash start.sh",
+    "frontend": "cd frontend && npm start",
+    "fetch:schemes": "cd scripts && node fetch_all.js"
+  }
+}

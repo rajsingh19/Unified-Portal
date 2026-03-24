@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    color: #25345f;
+    background:
+      radial-gradient(circle at 50% -20%, rgba(255, 219, 159, 0.2), transparent 32%),
+      linear-gradient(180deg, #e7ebf4 0%, #edf2f8 52%, #dfe6f1 100%);
+  }
+
+  button {
+    font: inherit;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+@layer utilities {
+  .text-shadow-soft {
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.18);
+  }
+
+  .bg-dune-card {
+    background-image:
+      radial-gradient(130% 110px at 18% 100%, rgba(214, 187, 150, 0.15), transparent 54%),
+      radial-gradient(120% 100px at 58% 100%, rgba(200, 187, 158, 0.12), transparent 56%),
+      radial-gradient(90% 80px at 88% 100%, rgba(181, 170, 148, 0.12), transparent 54%);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #edf2f8;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c6cfdf;
+  border-radius: 999px;
+}

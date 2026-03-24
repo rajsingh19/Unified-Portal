@@ -1,0 +1,15 @@
+{
+  "name": "rj-portal-fetchers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "District-wise Rajasthan scheme data fetchers",
+  "main": "fetch_all.js",
+  "scripts": {
+    "fetch": "node fetch_all.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.6",
+    "cheerio": "^1.2.0",
+    "playwright": "^1.58.2"
+  }
+}
