@@ -5,7 +5,6 @@ No hardcoded data anywhere in this file.
 """
 import asyncio, os, re, logging
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -28,17 +27,6 @@ from scrapers.scheme_dashboard_scraper import scrape_scheme_dashboards
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 log = logging.getLogger("api")
-
-
-origins = os.getenv("CORS_ORIGINS", "").split(",")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 from contextlib import asynccontextmanager
 
@@ -95,6 +83,7 @@ def _cors_origins():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
