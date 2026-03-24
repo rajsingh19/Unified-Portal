@@ -116,6 +116,10 @@ log.info(
 )
 
 _cache: dict = {}
+SOURCE_DATA_FILES = {
+    "rajras": Path(__file__).resolve().parent / "data" / "rajras_schemes.json",
+    "jansoochna": Path(__file__).resolve().parent / "data" / "jansoochna_schemes.json",
+}
 
 
 def _json_list_from_file(path: Path):
@@ -140,11 +144,72 @@ def _cache_entry(source_id):
     return _cache.get(source_id, {"status": "not_scraped", "data": [], "count": 0})
 
 
+def _source_snapshot(source_id: str):
+    file_path = SOURCE_DATA_FILES.get(source_id)
+    if file_path:
+        file_data = _safe_dict_rows(_json_list_from_file(file_path))
+        if file_data:
+            return file_data
+    return _safe_dict_rows(_cache.get(source_id, {}).get("data", []))
+
+
+def _prime_source_data(source_id: str):
+    entry = _cache.get(source_id, {})
+    if entry.get("status") in {"ok", "warming"}:
+        return
+    existing = _safe_dict_rows(entry.get("data", []))
+    _cache[source_id] = {
+        "source_id": source_id,
+        "data": existing,
+        "status": "warming",
+        "error": "",
+        "count": len(existing),
+        "scraped_at": entry.get("scraped_at"),
+    }
+    asyncio.create_task(_run(source_id, SCRAPERS[source_id]))
+
+
 async def _ensure_source_data(source_id: str):
     entry = _cache.get(source_id)
     if entry and isinstance(entry.get("data"), list) and entry.get("status") == "ok":
         return entry
     return await _run(source_id, SCRAPERS[source_id])
+
+
+def _prime_scheme_dashboard_data():
+    entry = _cache.get(SCHEME_DASHBOARD_CACHE_KEY, {})
+    if entry.get("status") in {"ok", "warming"}:
+        return
+
+    _cache[SCHEME_DASHBOARD_CACHE_KEY] = {
+        "data": _safe_dict_rows(entry.get("data", [])),
+        "live": bool(entry.get("live")),
+        "scraped_at": entry.get("scraped_at"),
+        "status": "warming",
+        "error": "",
+    }
+
+    async def _refresh():
+        try:
+            data = await asyncio.to_thread(scrape_scheme_dashboards)
+            _cache[SCHEME_DASHBOARD_CACHE_KEY] = {
+                "data": data,
+                "live": any(item.get("live") for item in data if isinstance(item, dict)),
+                "scraped_at": datetime.utcnow().isoformat() + "Z",
+                "status": "ok",
+                "error": "",
+            }
+        except Exception as exc:
+            log.exception("Scheme dashboard background fetch failed: %s", exc)
+            _cache[SCHEME_DASHBOARD_CACHE_KEY] = {
+                "data": _safe_dict_rows(entry.get("data", [])),
+                "live": bool(entry.get("live")),
+                "scraped_at": datetime.utcnow().isoformat() + "Z",
+                "status": "error",
+                "error": str(exc),
+            }
+
+    asyncio.create_task(_refresh())
 
 
 async def _ensure_scheme_dashboard_data():
@@ -288,38 +353,50 @@ async def scrape_one(source_id: str):
 
 @app.get("/data/rajras")
 async def get_rajras_schemes():
-    data_path = Path(__file__).resolve().parent / "data" / "rajras_schemes.json"
-    file_data = _safe_dict_rows(_json_list_from_file(data_path))
+    file_data = _source_snapshot("rajras")
     if file_data:
         return file_data
-    cached = _safe_dict_rows((await _ensure_source_data("rajras")).get("data", []))
+    _prime_source_data("rajras")
+    cached = _safe_dict_rows(_cache.get("rajras", {}).get("data", []))
     if cached:
-        return [
-            _enrich_scheme({**item, "_src": "rajras", "_src_label": "RajRAS", "_src_url": "rajras.in"})
-            for item in cached
-        ]
+        return cached
     return []
 
 @app.get("/data/jansoochna")
 async def get_jansoochna_schemes():
-    data_path = Path(__file__).resolve().parent / "data" / "jansoochna_schemes.json"
-    file_data = _safe_dict_rows(_json_list_from_file(data_path))
+    file_data = _source_snapshot("jansoochna")
     if file_data:
         return file_data
 
-    cached = _safe_dict_rows((await _ensure_source_data("jansoochna")).get("data", []))
+    _prime_source_data("jansoochna")
+    cached = _safe_dict_rows(_cache.get("jansoochna", {}).get("data", []))
     if cached:
-        return [
-            _enrich_scheme({**item, "_src": "jansoochna", "_src_label": "Jan Soochna", "_src_url": "jansoochna.rajasthan.gov.in"})
-            for item in cached
-        ]
+        return cached
     return []
 
 @app.get("/data/{source_id}")
 async def get_data(source_id: str, limit: Optional[int] = None):
     if source_id not in SCRAPERS:
         raise HTTPException(404)
-    entry = await _ensure_source_data(source_id)
+    data = _source_snapshot(source_id)
+    entry = _cache.get(source_id)
+    if data:
+        entry = {
+            **(entry or {"source_id": source_id, "status": "ok", "error": ""}),
+            "data": data,
+            "count": len(data),
+        }
+    elif entry and isinstance(entry.get("data"), list):
+        pass
+    else:
+        _prime_source_data(source_id)
+        entry = _cache.get(source_id, {
+            "source_id": source_id,
+            "status": "warming",
+            "data": [],
+            "count": 0,
+            "error": "",
+        })
     data = entry["data"][:limit] if limit else entry["data"]
     return {**entry, "data": data}
 
@@ -337,7 +414,17 @@ async def get_scheme_dashboards(refresh: bool = False):
     """
     if refresh:
         _cache.pop(SCHEME_DASHBOARD_CACHE_KEY, None)
-    return await _ensure_scheme_dashboard_data()
+    cached = _cache.get(SCHEME_DASHBOARD_CACHE_KEY)
+    if cached and isinstance(cached.get("data"), list):
+        return cached
+    _prime_scheme_dashboard_data()
+    return _cache.get(SCHEME_DASHBOARD_CACHE_KEY, {
+        "data": [],
+        "live": False,
+        "scraped_at": None,
+        "status": "warming",
+        "error": "",
+    })
 
 # ── Scheme enrichment helpers ──────────────────────────────────────────────────
 
@@ -473,16 +560,15 @@ async def aggregate():
     Merges all 4 sources into structured sections.
     ZERO hardcoded data — everything comes from scraper output.
     """
-    try:
-        await asyncio.gather(*[_ensure_source_data(sid) for sid in SCRAPERS])
-    except Exception as exc:
-        log.exception("Initial aggregate source warmup failed: %s", exc)
+    for sid in SCRAPERS:
+        if not _source_snapshot(sid):
+            _prime_source_data(sid)
 
     try:
-        igod_raw  = _safe_dict_rows(_cache_entry("igod").get("data", []))
-        rr_raw    = _safe_dict_rows(_cache_entry("rajras").get("data", []))
-        jsp_raw   = _safe_dict_rows(_cache_entry("jansoochna").get("data", []))
-        ms_raw    = _safe_dict_rows(_cache_entry("myscheme").get("data", []))
+        igod_raw  = _source_snapshot("igod")
+        rr_raw    = _source_snapshot("rajras")
+        jsp_raw   = _source_snapshot("jansoochna")
+        ms_raw    = _source_snapshot("myscheme")
 
         # ── 1. Schemes — tag source then enrich with parsed budget/beneficiary fields
         schemes = [
@@ -874,6 +960,36 @@ async def get_budget(refresh: bool = False):
                     return cached
             except:
                 pass
+    if not refresh:
+        cached = _cache.get(BUDGET_CACHE_KEY)
+        if cached:
+            return cached
+
+        _cache[BUDGET_CACHE_KEY] = {
+            "scraped_at": None,
+            "status": "warming",
+            "error": "",
+            "jjm_districts": [],
+            "jjm_districts_live": False,
+            "pmksy_districts": [],
+            "pmksy_districts_live": False,
+        }
+
+        async def _refresh_budget():
+            try:
+                data = await asyncio.to_thread(scrape_budget)
+                _cache[BUDGET_CACHE_KEY] = data
+            except Exception as exc:
+                log.exception("Budget background fetch failed: %s", exc)
+                _cache[BUDGET_CACHE_KEY] = {
+                    **_cache[BUDGET_CACHE_KEY],
+                    "status": "error",
+                    "error": str(exc),
+                    "scraped_at": datetime.utcnow().isoformat() + "Z",
+                }
+
+        asyncio.create_task(_refresh_budget())
+        return _cache[BUDGET_CACHE_KEY]
     data = await asyncio.to_thread(scrape_budget)
     _cache[BUDGET_CACHE_KEY] = data
     return data
