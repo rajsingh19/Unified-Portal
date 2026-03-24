@@ -4,7 +4,8 @@
   "private": true,
   "description": "Rajasthan Unified Government Portal — full-stack dashboard",
   "scripts": {
-    "start": "bash start.sh",
+    "start": "if [ -n \"$RENDER\" ]; then echo 'This repo should not be deployed as a single root Node service on Render. Use the render.yaml Blueprint or deploy frontend and backend as separate Render services.'; exit 1; else bash start.sh; fi",
+    "dev": "bash start.sh",
     "frontend": "cd frontend && npm start",
     "fetch:schemes": "cd scripts && node fetch_all.js"
   }

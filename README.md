@@ -191,6 +191,11 @@ This repo now includes a root [render.yaml](/home/raj/Downloads/RJ-Portal-Clean/
    - `DATA_GOV_API_KEY` if you want to override the default demo key
 7. Create the Blueprint and wait for both deploys to finish.
 
+Important:
+- Do not create a single root Node web service for this repo on Render.
+- If Render runs `yarn start` from the repository root, it will try to execute the local dev script instead of the production split deployment.
+- Use the root `render.yaml` Blueprint, or manually create two Render services: one static frontend and one Python backend.
+
 ### Notes
 
 - If you deploy the backend first, its Render URL will usually look like `https://your-backend-name.onrender.com`.
