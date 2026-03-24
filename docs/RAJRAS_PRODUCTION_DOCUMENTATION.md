@@ -220,6 +220,10 @@ REACT_APP_API_URL=http://localhost:8000 npm start
 - Open `http://localhost:8000/data/rajras`
 - Open frontend Schemes tab and filter `RajRAS`
 
+## 10.5 Render deployment note
+- The repository now includes a root `render.yaml` Blueprint for deploying the FastAPI backend and React frontend on Render.
+- On Render, `backend/data/*.json` should be treated as non-durable unless you attach a persistent disk or move dataset storage to an external system.
+
 ## 11. Known Limitations
 - RajRAS pages are descriptive; many do not provide explicit implementation percentages.
 - As a result, `progress_pct` is often null.

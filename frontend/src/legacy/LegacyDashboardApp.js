@@ -14,11 +14,7 @@ import {
   Cell, PieChart, Pie,
 } from "recharts";
 
-const API =
-  process.env.REACT_APP_API_URL ||
-  (typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
-    ? ""
-    : "https://rajasthan-cgwj.onrender.com");
+const API = (process.env.REACT_APP_API_URL || "").replace(/\/$/, "");
 
 const SRC = {
   igod:       { label: "IGOD Directory", icon: "🏛️", color: "#f97316", url: "https://igod.gov.in/sg/RJ/SPMA/organizations" },

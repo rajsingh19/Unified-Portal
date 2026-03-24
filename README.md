@@ -162,6 +162,44 @@ node fetch_all.js
 
 ---
 
+## Render Deployment
+
+This repo now includes a root [render.yaml](/home/raj/Downloads/RJ-Portal-Clean/render.yaml) Blueprint for deploying both services on Render:
+
+- `rj-portal-backend` as a Python web service
+- `rj-portal-frontend` as a static site
+
+### What the Blueprint config does
+
+- Builds the backend with `pip install -r backend/requirements.txt`
+- Starts FastAPI with `cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Builds the frontend with `cd frontend && npm ci && npm run build`
+- Publishes the React build output as a static site
+- Rewrites all frontend routes to `/index.html` for client-side routing
+
+### Deploy on Render
+
+1. Push this repo to GitHub or GitLab.
+2. In Render, choose **New +** → **Blueprint**.
+3. Select this repository.
+4. Render will detect `render.yaml` and propose both services.
+5. During setup, provide these environment values:
+   - On `rj-portal-backend`, set `CORS_ORIGINS` to your frontend Render URL
+   - On `rj-portal-frontend`, set `REACT_APP_API_URL` to your backend Render URL
+6. Provide any secret values when prompted:
+   - `ANTHROPIC_API_KEY` if you want the `/insights` endpoint enabled
+   - `DATA_GOV_API_KEY` if you want to override the default demo key
+7. Create the Blueprint and wait for both deploys to finish.
+
+### Notes
+
+- If you deploy the backend first, its Render URL will usually look like `https://your-backend-name.onrender.com`.
+- After the frontend is live, copy its URL into `CORS_ORIGINS` on the backend if you did not set it during initial Blueprint setup.
+- Backend scrape caches are in memory, so a backend restart clears them until the next scrape/startup refresh.
+- JSON files written under `backend/data/` are not durable on a standard Render web service filesystem. If you want long-lived file persistence for generated datasets, add a persistent disk or move these files to object storage / a database.
+
+---
+
 ## 🔑 Environment Variables
 
 Copy `.env.example` to `.env` before running:
@@ -174,6 +212,8 @@ cp .env.example .env
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes (for `/insights`) | Claude API key from console.anthropic.com |
 | `DATA_GOV_API_KEY` | No | data.gov.in API key (has a public default) |
+| `REACT_APP_API_URL` | No locally, yes for separate frontend hosting | Frontend API base URL |
+| `CORS_ORIGINS` | No locally, yes for locked-down production CORS | Comma-separated allowed frontend origins |
 
 ---
 

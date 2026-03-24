@@ -3,7 +3,7 @@ main.py — Rajasthan Dashboard API v3
 Every field served to the frontend comes directly from the scrapers.
 No hardcoded data anywhere in this file.
 """
-import asyncio, re, logging
+import asyncio, os, re, logging
 import json
 from datetime import datetime
 from pathlib import Path
@@ -70,7 +70,22 @@ async def lifespan(app_: FastAPI):
     yield
 
 app = FastAPI(title="Rajasthan Dashboard API v3", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+def _cors_origins():
+    raw = os.getenv("CORS_ORIGINS", "").strip()
+    if not raw:
+        return ["*"]
+    origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+    return origins or ["*"]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _cache: dict = {}
 def scrape_jansoochna():
