@@ -8,7 +8,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from scrapers.igod_scraper       import scrape_igod
@@ -27,6 +28,12 @@ from scrapers.scheme_dashboard_scraper import scrape_scheme_dashboards
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 log = logging.getLogger("api")
+
+DEFAULT_CORS_ORIGINS = [
+    "https://unified-portal-cpma.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 from contextlib import asynccontextmanager
 
@@ -74,10 +81,12 @@ app = FastAPI(title="Rajasthan Dashboard API v3", lifespan=lifespan)
 
 def _cors_origins():
     raw = os.getenv("CORS_ORIGINS", "").strip()
-    if not raw:
-        return ["*"]
-    origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
-    return origins or ["*"]
+    env_origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+    origins = []
+    for origin in DEFAULT_CORS_ORIGINS + env_origins:
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
 
 
 app.add_middleware(
@@ -89,6 +98,58 @@ app.add_middleware(
 )
 
 _cache: dict = {}
+
+
+def _json_list_from_file(path: Path):
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        log.warning("Failed to read JSON dataset from %s: %s", path, exc)
+        return []
+
+
+def _safe_dict_rows(data):
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _cache_entry(source_id):
+    return _cache.get(source_id, {"status": "not_scraped", "data": [], "count": 0})
+
+
+async def _ensure_source_data(source_id: str):
+    entry = _cache.get(source_id)
+    if entry and isinstance(entry.get("data"), list) and entry.get("status") == "ok":
+        return entry
+    return await _run(source_id, SCRAPERS[source_id])
+
+
+async def _ensure_scheme_dashboard_data():
+    if SCHEME_DASHBOARD_CACHE_KEY in _cache and isinstance(_cache[SCHEME_DASHBOARD_CACHE_KEY].get("data"), list):
+        return _cache[SCHEME_DASHBOARD_CACHE_KEY]
+    try:
+        data = await asyncio.to_thread(scrape_scheme_dashboards)
+        _cache[SCHEME_DASHBOARD_CACHE_KEY] = {
+            "data": data,
+            "live": any(item.get("live") for item in data if isinstance(item, dict)),
+            "scraped_at": datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception as exc:
+        log.exception("Scheme dashboard fetch failed: %s", exc)
+        _cache[SCHEME_DASHBOARD_CACHE_KEY] = {
+            "data": [],
+            "live": False,
+            "scraped_at": datetime.utcnow().isoformat() + "Z",
+            "error": str(exc),
+        }
+    return _cache[SCHEME_DASHBOARD_CACHE_KEY]
+
+
 def scrape_jansoochna():
     """Prefer full dataset scraping, but never let an empty run wipe out usable data."""
     try:
@@ -138,6 +199,24 @@ async def _run(sid, fn):
         log.error("❌ %s: %s", sid, e)
         _store(sid, [], "error", str(e))
     return _cache[sid]
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "detail": detail},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    log.exception("Unhandled API error: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "detail": "Internal server error"},
+    )
 
 # ── routes ─────────────────────────────────────────────────────────────────────
 @app.get("/")
@@ -190,44 +269,39 @@ async def scrape_one(source_id: str):
     return await _run(source_id, SCRAPERS[source_id])
 
 @app.get("/data/rajras")
-def get_rajras_schemes():
+async def get_rajras_schemes():
     data_path = Path(__file__).resolve().parent / "data" / "rajras_schemes.json"
-    if not data_path.exists():
-        cached = _cache.get("rajras", {}).get("data")
-        if cached:
-            return [
-                _enrich_scheme({**item, "_src": "rajras", "_src_label": "RajRAS", "_src_url": "rajras.in"})
-                for item in cached
-            ]
-        raise HTTPException(404, "RajRAS dataset not found and no cached RajRAS data is available.")
-    with data_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    file_data = _safe_dict_rows(_json_list_from_file(data_path))
+    if file_data:
+        return file_data
+    cached = _safe_dict_rows((await _ensure_source_data("rajras")).get("data", []))
+    if cached:
+        return [
+            _enrich_scheme({**item, "_src": "rajras", "_src_label": "RajRAS", "_src_url": "rajras.in"})
+            for item in cached
+        ]
+    return []
 
 @app.get("/data/jansoochna")
-def get_jansoochna_schemes():
+async def get_jansoochna_schemes():
     data_path = Path(__file__).resolve().parent / "data" / "jansoochna_schemes.json"
-    if data_path.exists():
-        with data_path.open("r", encoding="utf-8") as f:
-            file_data = json.load(f)
-        if isinstance(file_data, list) and file_data:
-            return file_data
-        log.warning("Jan Soochna dataset file is empty; falling back to cached data.")
+    file_data = _safe_dict_rows(_json_list_from_file(data_path))
+    if file_data:
+        return file_data
 
-    cached = _cache.get("jansoochna", {}).get("data")
+    cached = _safe_dict_rows((await _ensure_source_data("jansoochna")).get("data", []))
     if cached:
         return [
             _enrich_scheme({**item, "_src": "jansoochna", "_src_label": "Jan Soochna", "_src_url": "jansoochna.rajasthan.gov.in"})
             for item in cached
         ]
-    raise HTTPException(404, "Jan Soochna dataset not found and no cached Jan Soochna data is available.")
+    return []
 
 @app.get("/data/{source_id}")
-def get_data(source_id: str, limit: Optional[int] = None):
+async def get_data(source_id: str, limit: Optional[int] = None):
     if source_id not in SCRAPERS:
         raise HTTPException(404)
-    if source_id not in _cache:
-        raise HTTPException(404, f"No data yet — POST /scrape/{source_id} first")
-    entry = _cache[source_id]
+    entry = await _ensure_source_data(source_id)
     data = entry["data"][:limit] if limit else entry["data"]
     return {**entry, "data": data}
 
@@ -243,15 +317,9 @@ async def get_scheme_dashboards(refresh: bool = False):
     Live public metrics are returned when source pages expose them; otherwise the
     response includes truthful limited-source states for the frontend to render.
     """
-    if not refresh and SCHEME_DASHBOARD_CACHE_KEY in _cache:
-        return _cache[SCHEME_DASHBOARD_CACHE_KEY]
-    data = await asyncio.to_thread(scrape_scheme_dashboards)
-    _cache[SCHEME_DASHBOARD_CACHE_KEY] = {
-        "data": data,
-        "live": any(item.get("live") for item in data),
-        "scraped_at": datetime.utcnow().isoformat() + "Z",
-    }
-    return _cache[SCHEME_DASHBOARD_CACHE_KEY]
+    if refresh:
+        _cache.pop(SCHEME_DASHBOARD_CACHE_KEY, None)
+    return await _ensure_scheme_dashboard_data()
 
 # ── Scheme enrichment helpers ──────────────────────────────────────────────────
 
@@ -381,98 +449,137 @@ def _normalize_portal(p):
 
 # ── aggregate ──────────────────────────────────────────────────────────────────
 @app.get("/aggregate")
-def aggregate():
+async def aggregate():
     """
     Single endpoint consumed by the entire frontend.
     Merges all 4 sources into structured sections.
     ZERO hardcoded data — everything comes from scraper output.
     """
-    igod_raw  = _cache.get("igod",       {}).get("data", [])
-    rr_raw    = _cache.get("rajras",      {}).get("data", [])
-    jsp_raw   = _cache.get("jansoochna",  {}).get("data", [])
-    ms_raw    = _cache.get("myscheme",    {}).get("data", [])
+    try:
+        await asyncio.gather(*[_ensure_source_data(sid) for sid in SCRAPERS])
+    except Exception as exc:
+        log.exception("Initial aggregate source warmup failed: %s", exc)
 
-    # ── 1. Schemes — tag source then enrich with parsed budget/beneficiary fields
-    schemes = [
-        _enrich_scheme({**s, "_src": "rajras",     "_src_label": "RajRAS",      "_src_url": "rajras.in"})
-        for s in rr_raw
-    ] + [
-        _enrich_scheme({**s, "_src": "jansoochna", "_src_label": "Jan Soochna", "_src_url": "jansoochna.rajasthan.gov.in"})
-        for s in jsp_raw
-    ] + [
-        _enrich_scheme({**s, "_src": "myscheme",   "_src_label": "MyScheme",    "_src_url": "myscheme.gov.in"})
-        for s in ms_raw
-    ]
+    try:
+        igod_raw  = _safe_dict_rows(_cache_entry("igod").get("data", []))
+        rr_raw    = _safe_dict_rows(_cache_entry("rajras").get("data", []))
+        jsp_raw   = _safe_dict_rows(_cache_entry("jansoochna").get("data", []))
+        ms_raw    = _safe_dict_rows(_cache_entry("myscheme").get("data", []))
+
+        # ── 1. Schemes — tag source then enrich with parsed budget/beneficiary fields
+        schemes = [
+            _enrich_scheme({**s, "_src": "rajras",     "_src_label": "RajRAS",      "_src_url": "rajras.in"})
+            for s in rr_raw
+        ] + [
+            _enrich_scheme({**s, "_src": "jansoochna", "_src_label": "Jan Soochna", "_src_url": "jansoochna.rajasthan.gov.in"})
+            for s in jsp_raw
+        ] + [
+            _enrich_scheme({**s, "_src": "myscheme",   "_src_label": "MyScheme",    "_src_url": "myscheme.gov.in"})
+            for s in ms_raw
+        ]
 
 
-    # ── 2. Category breakdown (derived entirely from scheme data) ──────────────
-    cat_map: dict = {}
-    for s in schemes:
-        c = s.get("category") or "General"
-        if c not in cat_map:
-            cat_map[c] = {"name": c, "count": 0, "sources": set()}
-        cat_map[c]["count"] += 1
-        cat_map[c]["sources"].add(s.get("_src_label", ""))
-    categories = sorted(
-        [{"name": v["name"], "count": v["count"], "sources": list(v["sources"])} for v in cat_map.values()],
-        key=lambda x: -x["count"]
-    )
+        # ── 2. Category breakdown (derived entirely from scheme data) ──────────────
+        cat_map: dict = {}
+        for s in schemes:
+            c = s.get("category") or "General"
+            if c not in cat_map:
+                cat_map[c] = {"name": c, "count": 0, "sources": set()}
+            cat_map[c]["count"] += 1
+            cat_map[c]["sources"].add(s.get("_src_label", ""))
+        categories = sorted(
+            [{"name": v["name"], "count": v["count"], "sources": list(v["sources"])} for v in cat_map.values()],
+            key=lambda x: -x["count"]
+        )
 
-    # ── 3. Source counts for charts ────────────────────────────────────────────
-    source_counts = [
-        {"source": "RajRAS",      "count": len(rr_raw),  "color": "#3b82f6"},
-        {"source": "Jan Soochna", "count": len(jsp_raw), "color": "#10b981"},
-        {"source": "MyScheme",    "count": len(ms_raw),  "color": "#8b5cf6"},
-        {"source": "IGOD Directory","count": len(igod_raw),"color": "#f97316"},
-    ]
+        # ── 3. Source counts for charts ────────────────────────────────────────────
+        source_counts = [
+            {"source": "RajRAS",      "count": len(rr_raw),  "color": "#3b82f6"},
+            {"source": "Jan Soochna", "count": len(jsp_raw), "color": "#10b981"},
+            {"source": "MyScheme",    "count": len(ms_raw),  "color": "#8b5cf6"},
+            {"source": "IGOD Directory","count": len(igod_raw),"color": "#f97316"},
+        ]
 
-    # ── 4. Portals (igod only) ─────────────────────────────────────────────────
-    portals = [_normalize_portal(p) for p in igod_raw]
+        # ── 4. Portals (igod only) ─────────────────────────────────────────────────
+        portals = [_normalize_portal(p) for p in igod_raw]
 
-    # ── 5. KPIs ────────────────────────────────────────────────────────────────
-    sources_live = sum(1 for sid in SCRAPERS if _cache.get(sid, {}).get("status") == "ok")
-    kpis = {
-        "total_schemes":    len(schemes),
-        "total_portals":    len(portals),
-        "unique_categories":len(categories),
-        "sources_live":     sources_live,
-        "rajras_count":     len(rr_raw),
-        "jansoochna_count": len(jsp_raw),
-        "myscheme_count":   len(ms_raw),
-        "igod_count":       len(igod_raw),
-    }
-
-    # ── 6. Alerts — built from real scraper data patterns ─────────────────────
-    # ── 7. Source metadata ─────────────────────────────────────────────────────
-    source_status = {
-        sid: {
-            "status":     _cache.get(sid, {}).get("status", "not_scraped"),
-            "count":      _cache.get(sid, {}).get("count", 0),
-            "scraped_at": _cache.get(sid, {}).get("scraped_at"),
-            "error":      _cache.get(sid, {}).get("error", ""),
+        # ── 5. KPIs ────────────────────────────────────────────────────────────────
+        sources_live = sum(1 for sid in SCRAPERS if _cache.get(sid, {}).get("status") == "ok")
+        kpis = {
+            "total_schemes":    len(schemes),
+            "total_portals":    len(portals),
+            "unique_categories":len(categories),
+            "sources_live":     sources_live,
+            "rajras_count":     len(rr_raw),
+            "jansoochna_count": len(jsp_raw),
+            "myscheme_count":   len(ms_raw),
+            "igod_count":       len(igod_raw),
         }
-        for sid in SCRAPERS
-    }
 
-    # Attach live JJM districts if available in cache
-    jjm_cache     = _cache.get(JJM_CACHE_KEY, {})
-    jjm_districts = jjm_cache.get("data", [])
-    pmksy_cache   = _cache.get(PMKSY_CACHE_KEY, {})
-    pmksy_districts = pmksy_cache.get("data", [])
-    alerts = _build_alerts(schemes, portals, igod_raw, jjm_districts, source_status)
+        # ── 6. Alerts — built from real scraper data patterns ─────────────────────
+        # ── 7. Source metadata ─────────────────────────────────────────────────────
+        source_status = {
+            sid: {
+                "status":     _cache.get(sid, {}).get("status", "not_scraped"),
+                "count":      _cache.get(sid, {}).get("count", 0),
+                "scraped_at": _cache.get(sid, {}).get("scraped_at"),
+                "error":      _cache.get(sid, {}).get("error", ""),
+            }
+            for sid in SCRAPERS
+        }
 
-    return {
-        "scraped_at":     datetime.utcnow().isoformat() + "Z",
-        "kpis":           kpis,
-        "schemes":        schemes,
-        "portals":        portals,
-        "categories":     categories,
-        "source_counts":  source_counts,
-        "alerts":         alerts,
-        "source_status":  source_status,
-        "jjm_districts":  jjm_districts,
-        "pmksy_districts": pmksy_districts,
-    }
+        # Attach live JJM districts if available in cache
+        jjm_cache     = _cache.get(JJM_CACHE_KEY, {})
+        jjm_districts = _safe_dict_rows(jjm_cache.get("data", []))
+        pmksy_cache   = _cache.get(PMKSY_CACHE_KEY, {})
+        pmksy_districts = _safe_dict_rows(pmksy_cache.get("data", []))
+        alerts = _build_alerts(schemes, portals, igod_raw, jjm_districts, source_status)
+
+        return {
+            "scraped_at":     datetime.utcnow().isoformat() + "Z",
+            "kpis":           kpis,
+            "schemes":        schemes,
+            "portals":        portals,
+            "categories":     categories,
+            "source_counts":  source_counts,
+            "alerts":         alerts,
+            "source_status":  source_status,
+            "jjm_districts":  jjm_districts,
+            "pmksy_districts": pmksy_districts,
+        }
+    except Exception as exc:
+        log.exception("Aggregate route failed: %s", exc)
+        source_status = {
+            sid: {
+                "status": _cache.get(sid, {}).get("status", "error"),
+                "count": _cache.get(sid, {}).get("count", 0),
+                "scraped_at": _cache.get(sid, {}).get("scraped_at"),
+                "error": _cache.get(sid, {}).get("error", "") or str(exc),
+            }
+            for sid in SCRAPERS
+        }
+        return {
+            "scraped_at": datetime.utcnow().isoformat() + "Z",
+            "kpis": {
+                "total_schemes": 0,
+                "total_portals": 0,
+                "unique_categories": 0,
+                "sources_live": 0,
+                "rajras_count": 0,
+                "jansoochna_count": 0,
+                "myscheme_count": 0,
+                "igod_count": 0,
+            },
+            "schemes": [],
+            "portals": [],
+            "categories": [],
+            "source_counts": [],
+            "alerts": [],
+            "source_status": source_status,
+            "jjm_districts": [],
+            "pmksy_districts": [],
+            "error": "aggregate_unavailable",
+        }
 
 
 def _build_alerts(schemes, portals, igod_raw, jjm_districts=None, source_status=None):

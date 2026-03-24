@@ -6,7 +6,7 @@
  * 3. Jan Soochna & MyScheme scrapers fixed with better API endpoints + fallback
  */
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import axios from "axios";
 import InsightsEngine from "../InsightsEngine";
 import {
@@ -4318,6 +4318,8 @@ export default function App() {
   const [jansoochnaData, setJansoochnaData] = useState([]);
   const [schemeDashboards, setSchemeDashboards] = useState([]);
   const [desktopViewport, setDesktopViewport] = useState(isDesktopViewport);
+  const pollInFlightRef = useRef(false);
+  const pollFailureCountRef = useRef(0);
 
   const addLog = useCallback((msg,type="info")=>{
     const ts=new Date().toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
@@ -4332,6 +4334,8 @@ export default function App() {
   }, []);
 
   const poll = useCallback(async(silent=true)=>{
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
     if(!silent) setRef(true);
     try {
       const [s,a,rj,jsp,ms,ig,sd]=await Promise.all([
@@ -4348,6 +4352,7 @@ export default function App() {
       const jansoochnaRows = Array.isArray(jsp?.data) ? jsp.data : [];
       const myschemeRows = Array.isArray(ms?.data?.data) ? ms.data.data : [];
       const igodRows = Array.isArray(ig?.data?.data) ? ig.data.data : [];
+      const anyResponse = Boolean(s || a || rj || jsp || ms || ig || sd);
 
       if(s) setStatus(nextStatus);
       if(a?.data) {
@@ -4364,10 +4369,24 @@ export default function App() {
       setRajrasData(rajrasRows);
       setJansoochnaData(jansoochnaRows);
       setSchemeDashboards(Array.isArray(sd?.data?.data) ? sd.data.data : []);
+      pollFailureCountRef.current = anyResponse ? 0 : pollFailureCountRef.current + 1;
       if(!silent) addLog("✅ Data refreshed","success");
-    } catch(e){ if(!silent) addLog("❌ Refresh failed","error"); }
-    if(!silent) setRef(false);
+    } catch(e){
+      pollFailureCountRef.current += 1;
+      if(!silent) addLog("❌ Refresh failed","error");
+    } finally {
+      pollInFlightRef.current = false;
+      if(!silent) setRef(false);
+    }
   },[addLog]);
+
+  const nextPollDelay = useCallback(() => {
+    const failures = pollFailureCountRef.current;
+    if (failures <= 0) return 15000;
+    if (failures === 1) return 30000;
+    if (failures === 2) return 45000;
+    return 60000;
+  }, []);
 
   const fetchBudget = useCallback(async()=>{
     if(budget) return;
@@ -4379,10 +4398,21 @@ export default function App() {
   useEffect(()=>{ fetchBudget(); },[fetchBudget]);
   useEffect(()=>{
     axios.get(`${API}/`).then(()=>setOnline(true)).catch(()=>setOnline(false));
-    poll(true);
-    const id=setInterval(()=>poll(true),8000);
-    return ()=>clearInterval(id);
-  },[poll]);
+    let cancelled = false;
+    let timeoutId = null;
+
+    const run = async () => {
+      await poll(true);
+      if (cancelled) return;
+      timeoutId = window.setTimeout(run, nextPollDelay());
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  },[poll, nextPollDelay]);
 
   const scrapeOne = useCallback(async sid=>{
     setScraping(p=>({...p,[sid]:true}));
